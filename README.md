@@ -37,11 +37,13 @@ Containerized Streamlit prototype for the social support intake workflow. The ap
 
 - `DATABASE_URL` (default `postgresql://app_user:app_password@db:5432/aiworkflow`): override this to point at a different PostgreSQL instance.
 - `OLLAMA_BASE_URL` (default `http://ollama:11434`): change if the app should reach a different Ollama endpoint.
+- `OLLAMA_SKIP_SETUP` (default unset): set to `1` to bypass the automatic on-start model pull.
 - `OLLAMA_API_KEY` (optional, default `ollama`): override if the Ollama instance enforces an OpenAI-compatible token.
+- `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` (optional): when both are set the Ollama client wraps requests with the Langfuse OpenAI integration so usage is captured in Langfuse (configure `LANGFUSE_HOST` if your Langfuse deployment is self-hosted).
 - The Postgres credentials and database name can be updated in `docker-compose.yml`. Make sure the values stay in sync with `DATABASE_URL`.
 - Streamlit configuration can be customised via additional environment variables on the `app` service. See the [Streamlit config reference](https://docs.streamlit.io/library/advanced-features/configuration#set-configuration-options) for details.
 
-The document parser relies on the `granite3.2-vision` model exposed by the Ollama service. The container image installs `poppler-utils` so `pdf2image` can rasterize PDFs before sending them to the model. Page transcription uses the OpenAI Python client configured against Ollama's OpenAI-compatible endpoint.
+The document parser relies on the `granite3.2-vision` model exposed by the Ollama service. On first launch the app triggers a pull via the Ollama HTTP API (unless `OLLAMA_SKIP_SETUP=1`). The app image installs `poppler-utils` so `pdf2image` can rasterize PDFs before sending them to the model, and page transcription uses the OpenAI Python client configured against Ollama's OpenAI-compatible endpoint.
 
 Persistent Postgres data lives in the named volume `postgres_data`. Delete it with `make clean` if you want a clean slate.
 

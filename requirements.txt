@@ -8,3 +8,4 @@ psycopg[binary]
 pdf2image
 Pillow
 openai
+langfuse

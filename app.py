@@ -13,8 +13,9 @@ from typing import Optional
 import streamlit as st
 
 # Import the decision logic
-from eligibility import decide_eligibility
+from eligibility import decide_eligibility, verify_document_consistency
 from db import ApplicationCreate, ApplicationCRUD, DocumentMarkdownCreate
+from ollama import OllamaClient
 
 st.set_page_config(page_title="Social Support — Applicant Intake", page_icon="📝", layout="wide")
 
@@ -45,14 +46,15 @@ def _load_document_parser_module():
 
 document_parser_module = _load_document_parser_module()
 DocumentParser = document_parser_module.DocumentParser
-setup_ollama_model = getattr(document_parser_module, "setup_ollama_model", None)
-if callable(setup_ollama_model):
+
+ollama_client = OllamaClient(base_url=os.getenv("OLLAMA_BASE_URL"), api_key=os.getenv("OLLAMA_API_KEY"))
+if os.getenv("OLLAMA_SKIP_SETUP") != "1":
     try:
-        setup_ollama_model(os.getenv("OLLAMA_BASE_URL"))
+        ollama_client.ensure_model()
     except Exception as exc:  # noqa: BLE001
         st.warning(f"Ollama model setup failed: {exc}")
 
-document_parser = DocumentParser(UPLOAD_TMP_DIR)
+document_parser = DocumentParser(UPLOAD_TMP_DIR, ollama_client=ollama_client)
 
 st.markdown("### 📝 Social Support — Applicant Intake (Simplified)")
 st.caption(
@@ -190,12 +192,14 @@ with st.form("intake_form", border=True):
             if not DISABLE_DOCUMENTS and bank_statements:
                 saved_statement_paths = document_parser.save(bank_statements)
             parsed_documents_markdown = []
+            fraud_analysis_markdown = None
             if saved_statement_paths:
+                ollama_model_name = getattr(ollama_client, "default_model", "granite3.2-vision")
                 for statement_path in saved_statement_paths:
                     try:
-                        markdown_pages = document_parser.pdf_pages_to_markdown(
+                        markdown_pages = document_parser.pdf_to_markdown(
                             statement_path,
-                            base_url=os.getenv("OLLAMA_BASE_URL"),
+                            model_name=ollama_model_name,
                         )
                         parsed_documents_markdown.append(
                             {
@@ -205,8 +209,35 @@ with st.form("intake_form", border=True):
                         )
                     except Exception as exc:  # noqa: BLE001
                         st.warning(
-                            f"Failed to transcribe {Path(statement_path).name} with granite3.2-vision: {exc}"
+                            f"Failed to transcribe {Path(statement_path).name} with {ollama_model_name}: {exc}"
                         )
+                if parsed_documents_markdown:
+                    applicant_profile = {
+                        "full_name": full_name,
+                        "date_of_birth": dob.isoformat() if isinstance(dob, date) else str(dob),
+                        "emirates_id_number": emirates_id_num,
+                        "nationality": nationality,
+                        "emirate": emirate,
+                        "employment_status": employment_status,
+                        "employer": employer,
+                        "job_title": job_title,
+                        "months_employed": months_employed,
+                        "monthly_income_aed": monthly_income_aed,
+                        "other_income_aed": other_income,
+                        "bank_name": bank_name,
+                        "average_balance_last_6_months_aed": avg_balance_6m,
+                        "credit_score": credit_score,
+                    }
+                    try:
+                        fraud_analysis_markdown = verify_document_consistency(
+                            ollama_client,
+                            applicant_profile,
+                            parsed_documents_markdown,
+                            model_name=ollama_model_name,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        st.warning(f"Document verification check failed: {exc}")
+                        fraud_analysis_markdown = None
 
             # --- Decision: use credit_score and monthly_income_aed ---
             cs_val = int(credit_score) if credit_score and credit_score > 0 else None
@@ -233,6 +264,10 @@ with st.form("intake_form", border=True):
             else:  # insufficient
                 st.warning("ℹ️ Unable to decide: please provide credit score and monthly income.")
 
+            if fraud_analysis_markdown:
+                st.markdown("#### Document Consistency Check")
+                st.markdown(fraud_analysis_markdown)
+
             # Show a compact payload preview
             st.divider()
             st.caption("Submission captured (demo). Below is a structured preview:")
@@ -245,12 +280,14 @@ with st.form("intake_form", border=True):
                 "employment_status": employment_status,
                 "monthly_income_aed": monthly_income_aed,
                 "credit_score": credit_score,
+                "ai_veridct": fraud_analysis_markdown,
                 "decision": decision,
                 "contact_pref": contact_pref,
                 "best_time": best_time,
                 "notes": additional_info,
                 "bank_statement_paths": saved_statement_paths,
                 "parsed_documents_markdown": parsed_documents_markdown,
+                "fraud_analysis_markdown": fraud_analysis_markdown,
             }
             st.json(payload)
 
@@ -271,6 +308,7 @@ with st.form("intake_form", border=True):
                             contact_pref=contact_pref,
                             best_time=best_time or None,
                             notes=additional_info or None,
+                            ai_veridct=fraud_analysis_markdown,
                             decision=decision,
                         )
                         saved_record = CRUD.create(db_payload)

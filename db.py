@@ -32,6 +32,7 @@ class ApplicationRecord:
     contact_pref: Optional[str]
     best_time: Optional[str]
     notes: Optional[str]
+    ai_veridct: Optional[str]
     decision: Optional[Dict[str, Any]]
     created_at: datetime
     updated_at: datetime
@@ -56,6 +57,7 @@ class ApplicationCreate:
     contact_pref: Optional[str] = None
     best_time: Optional[str] = None
     notes: Optional[str] = None
+    ai_veridct: Optional[str] = None
     decision: Optional[Dict[str, Any]] = None
 
 
@@ -119,10 +121,19 @@ class ApplicationCRUD:
                         contact_pref TEXT,
                         best_time TEXT,
                         notes TEXT,
+                        ai_veridct TEXT,
                         decision JSONB,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
+                    """
+                ).format(table=self._table_identifier)
+            )
+            cur.execute(
+                sql.SQL(
+                    """
+                    ALTER TABLE {table}
+                    ADD COLUMN IF NOT EXISTS ai_veridct TEXT
                     """
                 ).format(table=self._table_identifier)
             )
@@ -374,6 +385,7 @@ class ApplicationCRUD:
             "contact_pref",
             "best_time",
             "notes",
+            "ai_veridct",
             "decision",
             "created_at",
             "updated_at",
@@ -393,6 +405,7 @@ class ApplicationCRUD:
             "contact_pref",
             "best_time",
             "notes",
+            "ai_veridct",
             "decision",
         ]
 

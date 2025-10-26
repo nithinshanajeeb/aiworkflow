@@ -1,18 +1,15 @@
-"""Utility for handling document uploads in the intake app."""
+"""Utility helpers for saving PDFs and transcribing their pages to Markdown."""
 
 from __future__ import annotations
 
 import base64
 import io
-import json
-import os
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Iterable, List, Optional
-from urllib import error, request
+from typing import Iterable, List, Optional, Sequence
 
-from openai import OpenAI
+from ollama import OllamaClient
 
 try:
     from streamlit.runtime.uploaded_file_manager import UploadedFile
@@ -20,169 +17,94 @@ except ModuleNotFoundError:  # pragma: no cover - used only when streamlit is av
     UploadedFile = object  # type: ignore[assignment]
 
 
-def _resolve_base_url(base_url: Optional[str]) -> str:
-    return (base_url or os.getenv("OLLAMA_BASE_URL") or "http://ollama:11434").rstrip("/")
-
-
-def _stream_ollama_request(
-    *,
-    base_url: str,
-    path: str,
-    payload: dict,
-    timeout: int,
-) -> List[dict]:
-    url = f"{base_url}{path}"
-    body = json.dumps(payload).encode("utf-8")
-    req = request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    messages: List[dict] = []
-    try:
-        with request.urlopen(req, timeout=timeout) as response:
-            for raw_line in response:
-                line = raw_line.decode("utf-8").strip()
-                if not line:
-                    continue
-                messages.append(json.loads(line))
-    except error.URLError as exc:
-        raise RuntimeError(f"Failed request to Ollama at {url}: {exc}") from exc
-
-    return messages
-
-
-def setup_ollama_model(
-    base_url: Optional[str] = None,
-    model_name: str = "granite3.2-vision",
-) -> None:
-    """Ensure the requested Ollama model is available by pulling it if missing."""
-
-    resolved_base = _resolve_base_url(base_url)
-
-    tags_url = f"{resolved_base}/api/tags"
-    try:
-        with request.urlopen(tags_url, timeout=10) as response:
-            payload = json.load(response)
-    except error.URLError as exc:
-        raise RuntimeError(f"Unable to reach Ollama at {resolved_base}: {exc}") from exc
-
-    models = {entry.get("name") for entry in payload.get("models", [])}
-    if model_name in models:
-        return
-
-    _stream_ollama_request(
-        base_url=resolved_base,
-        path="/api/pull",
-        payload={"name": model_name},
-        timeout=300,
-    )
-
-
-def _get_openai_client(base_url: str) -> OpenAI:
-    api_key = os.getenv("OLLAMA_API_KEY") or "ollama"
-    return OpenAI(base_url=f"{base_url}/v1", api_key=api_key)
-
-
 class DocumentParser:
-    """Save uploaded documents to a temporary workspace directory and parse them."""
+    """Minimal PDF pipeline: save uploads, rasterize pages, send to Ollama."""
 
-    def __init__(self, base_dir: Optional[Path] = None) -> None:
-        base_dir = base_dir or Path(tempfile.gettempdir()) / "aiworkflow_uploads"
-        self.base_dir = Path(base_dir)
+    def __init__(
+        self,
+        base_dir: Optional[Path] = None,
+        ollama_client: Optional[OllamaClient] = None,
+    ) -> None:
+        working_dir = base_dir or Path(tempfile.gettempdir()) / "aiworkflow_uploads"
+        self.base_dir = Path(working_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.ollama_client = ollama_client
+
+    def attach_ollama_client(self, client: OllamaClient) -> None:
+        """Set or replace the Ollama client used for transcription."""
+
+        self.ollama_client = client
+
+    def save_pdf(self, uploaded_file: UploadedFile) -> Path:
+        """Persist a single uploaded PDF and return the saved path."""
+
+        if not hasattr(uploaded_file, "name") or not hasattr(uploaded_file, "getbuffer"):
+            raise TypeError("Uploaded file must provide 'name' and 'getbuffer' attributes")
+
+        original_name = Path(getattr(uploaded_file, "name") or "upload.pdf").name
+        suffix = Path(original_name).suffix or ".pdf"
+        destination = self.base_dir / f"{uuid.uuid4().hex}{suffix}"
+
+        with destination.open("wb") as dest_file:
+            dest_file.write(uploaded_file.getbuffer())
+
+        return destination
 
     def save(self, files: Iterable[UploadedFile]) -> List[str]:
-        """Persist uploaded files and return their absolute paths."""
-        saved_paths: List[str] = []
-        for uploaded_file in files:
-            safe_name = Path(uploaded_file.name).name
-            unique_name = f"{uuid.uuid4().hex}_{safe_name}"
-            destination = self.base_dir / unique_name
-            with destination.open("wb") as dest_file:
-                dest_file.write(uploaded_file.getbuffer())
-            saved_paths.append(str(destination))
-        return saved_paths
+        """Persist multiple uploaded PDFs; convenience wrapper for Streamlit usage."""
 
-    def pdf_pages_to_markdown(
-        self,
-        pdf_path: Path | str,
-        base_url: Optional[str] = None,
-        model_name: str = "granite3.2-vision",
-    ) -> List[str]:
-        """Split a PDF into pages, use Ollama vision to transcribe each, and return Markdown strings."""
+        return [str(self.save_pdf(uploaded_file)) for uploaded_file in files]
 
-        pdf_path = Path(pdf_path)
-        if not pdf_path.exists():
-            raise FileNotFoundError(f"PDF not found: {pdf_path}")
+    def pdf_to_images(self, pdf_path: Path | str) -> List[bytes]:
+        """Convert each PDF page into a PNG byte payload."""
+
+        pdf_location = Path(pdf_path)
+        if not pdf_location.exists():
+            raise FileNotFoundError(f"PDF not found: {pdf_location}")
 
         try:
             from pdf2image import convert_from_path
         except ImportError as exc:  # pragma: no cover - dependency is optional at runtime
             raise RuntimeError("pdf2image is required for PDF to image conversion.") from exc
 
-        images = convert_from_path(str(pdf_path))
-        resolved_base = _resolve_base_url(base_url)
-        client = _get_openai_client(resolved_base)
-
-        page_markdown: List[str] = []
-        for index, image in enumerate(images, start=1):
+        image_payloads: List[bytes] = []
+        for image in convert_from_path(str(pdf_location)):
             buffer = io.BytesIO()
             image.save(buffer, format="PNG")
-            image_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            markdown = _generate_markdown_from_image(
-                client=client,
+            image_payloads.append(buffer.getvalue())
+
+        return image_payloads
+
+    def images_to_markdown(
+        self,
+        image_payloads: Sequence[bytes],
+        *,
+        model_name: Optional[str] = None,
+    ) -> List[str]:
+        """Send image byte payloads to the Ollama client and return Markdown per page."""
+
+        if self.ollama_client is None:
+            raise RuntimeError("Ollama client is not configured for DocumentParser")
+
+        page_markdown: List[str] = []
+        for index, image_bytes in enumerate(image_payloads, start=1):
+            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+            markdown = self.ollama_client.image_to_markdown(
+                image_b64,
                 model_name=model_name,
-                image_b64=image_b64,
                 page_number=index,
             )
             page_markdown.append(markdown.strip())
 
         return page_markdown
 
+    def pdf_to_markdown(
+        self,
+        pdf_path: Path | str,
+        *,
+        model_name: Optional[str] = None,
+    ) -> List[str]:
+        """High-level helper: rasterize a PDF then return Markdown per page."""
 
-def _generate_markdown_from_image(
-    *,
-    client: OpenAI,
-    model_name: str,
-    image_b64: str,
-    page_number: int,
-) -> str:
-    data_url = f"data:image/png;base64,{image_b64}"
-    try:
-        response = client.chat.completions.create(
-            model=model_name,
-            temperature=0,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an assistant that transcribes documents into concise Markdown.",
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Extract the text from this page and respond in Markdown."},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": data_url},
-                        },
-                    ],
-                },
-            ],
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"Ollama chat completion failed on page {page_number}: {exc}") from exc
-
-    choices = getattr(response, "choices", None) or []
-    if not choices:
-        raise RuntimeError(f"No completion returned for page {page_number}")
-
-    choice = choices[0]
-    message = getattr(choice, "message", None)
-    content = getattr(message, "content", None) if message else None
-    if not content:
-        raise RuntimeError(f"Empty completion content for page {page_number}")
-
-    return content
+        images = self.pdf_to_images(pdf_path)
+        return self.images_to_markdown(images, model_name=model_name)
