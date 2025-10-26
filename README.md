@@ -2,6 +2,16 @@
 
 Streamlit-based prototype for a social support intake workflow. Applicants submit personal details and income documentation, the app evaluates eligibility, and everything is stored in PostgreSQL for follow-up. Document parsing and fraud checks rely on an Ollama-hosted `granite3.2-vision` model via the OpenAI-compatible API, while eligibility scoring comes from the simple rules engine in `eligibility.py`.
 
+## Workflow Overview
+
+![Intake workflow diagram](images/chart.png)
+
+- The Streamlit UI collects form responses and uploaded PDFs, then validates that every required field and consent value is present before forwarding data downstream.
+- Valid submissions are persisted as a structured payload and the raw documents are staged for parsing; missing information kicks the flow back to the applicant for corrections.
+- Document ingestion converts PDFs into images, calls the Ollama `granite3.2-vision` model (with Langfuse telemetry), and stores the generated Markdown alongside the submission.
+- Fraud analysis reconciles the parsed documents with the stated responses to verify consistency and assemble an applicant profile before running the eligibility rules engine.
+- Final decisions—approve, conditional, or decline—are recorded in the database and surfaced to the applicant together with a JSON preview of the stored application.
+
 ## Why Run Ollama Natively?
 
 - Keeps sensitive applicant data on the same machine; no third-party API uploads are required.
