@@ -1,6 +1,24 @@
 # AI Workflow Intake App
 
-Containerized Streamlit prototype for the social support intake workflow. The app persists submissions to PostgreSQL using the helper utilities in `db.py`.
+Streamlit-based prototype for a social support intake workflow. Applicants submit personal details and income documentation, the app evaluates eligibility, and everything is stored in PostgreSQL for follow-up. Document parsing and fraud checks rely on an Ollama-hosted `granite3.2-vision` model via the OpenAI-compatible API, while eligibility scoring comes from the simple rules engine in `eligibility.py`.
+
+## Why Run Ollama Natively?
+
+- Keeps sensitive applicant data on the same machine; no third-party API uploads are required.
+- Gives full control over model selection, caching, and GPU usage for faster PDF transcription.
+- Allows experimentation with other Ollama-hosted models without touching upstream cloud services.
+
+## Running Ollama Locally
+
+1. Install Ollama following the platform instructions at https://ollama.com/download.
+2. Start the daemon with `ollama serve` (macOS/Linux) or launch the desktop app.
+3. Pull the model used by this project:
+
+   ```bash
+   ollama pull granite3.2-vision
+   ```
+
+4. Ensure the service is reachable at `http://localhost:11434` (the default). If you run it elsewhere, set `OLLAMA_BASE_URL` for both the Streamlit app and worker containers.
 
 ## Prerequisites
 
