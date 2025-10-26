@@ -1,0 +1,10 @@
+numpy
+scikit-learn
+streamlit
+watchdog
+tqdm
+joblib
+psycopg[binary]
+pdf2image
+Pillow
+openai
